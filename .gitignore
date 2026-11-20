@@ -1,0 +1,20 @@
+# Compiled binaries and object files
+*.exe
+*.o
+*.out
+tests/demo_main
+tests/test_task1
+tests/test_task2
+tests/test_task3
+tests/test_task4
+tests/test_task5
+tests/report_data
+
+# LaTeX build artifacts
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.fls
+report/*.fdb_latexmk
+report/*.synctex.gz

@@ -1,0 +1,307 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue
+}
+
+\lstset{
+    language=C++,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{gray},
+    stringstyle=\color{teal},
+    frame=single,
+    breaklines=true,
+    columns=flexible
+}
+
+\title{\textbf{Discrete Structure (CO1007) --- Assignment Report}\\
+\large A* Search Algorithms in Practical Graph and Grid Applications}
+\author{Student ID: 2410053\\
+Faculty of Computer Science and Engineering\\
+Ho Chi Minh City University of Technology (HCMUT)}
+\date{November 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ============================================================================
+\section{Overview and Shared A* Architecture}
+% ============================================================================
+
+All five programming tasks are implemented in standard C++11 using only the six headers permitted by the LMS CodeRunner environment (\texttt{<iostream>}, \texttt{<fstream>}, \texttt{<string>}, \texttt{<cmath>}, \texttt{<vector>}, \texttt{<algorithm>}). Because \texttt{<queue>} is not permitted, the open set is implemented as a custom binary min-heap backed by \texttt{std::vector}.
+
+All five tasks share a single generic A* engine (\texttt{runAStar}) parameterized by a lightweight task adapter providing \texttt{isGoal}, \texttt{heuristic}, \texttt{forEachNeighbor}, and \texttt{formatName}. Key design invariants:
+\begin{itemize}
+    \item \textbf{Floating-point tolerance:} All cost comparisons use $\varepsilon = 10^{-9}$.
+    \item \textbf{Single shared tie-breaker:} Heap entries are ordered by smaller $f$, then smaller $h$, then smaller integer state index.
+    \item \textbf{Re-opening with lazy deletion:} Whenever a strictly cheaper path ($g_{\text{new}} < \text{bestG}[s] - \varepsilon$) is discovered to any state $s$, $\text{bestG}[s]$ and $\text{parent}[s]$ are updated and a fresh heap entry is pushed; stale entries popped later are discarded when $g_{\text{pop}} > \text{bestG}[s] + \varepsilon$. Search terminates when a goal state is popped.
+    \item \textbf{Verification:} Every task is validated against an independent brute-force Dijkstra solver (\texttt{tests/reference/ref\_dijkstra.h}) and checked with AddressSanitizer, LeakSanitizer, and UndefinedBehaviorSanitizer (\texttt{-fsanitize=address,undefined}) with zero warnings and zero leaks (1,783/1,783 test assertions passed).
+\end{itemize}
+
+% ============================================================================
+\section{Task 1: Mesh Network Packet Routing with Congestion Penalty}
+% ============================================================================
+
+\subsection{Degree Computation from the Adjacency Matrix}
+Given the $100 \times 100$ adjacency matrix \texttt{weightMatrix}, an edge $u \to v$ exists if and only if $u \neq v$ and $\texttt{weightMatrix}[u][v] > 0$. The degree of node $v$ is computed prior to search by counting its active outgoing connections (row scan):
+\[
+    \text{degree}(v) = \bigl|\{\, j \in \{0,\dots,99\} \mid j \neq v \text{ and } \texttt{weightMatrix}[v][j] > 0 \,\}\bigr|.
+\]
+This computation is isolated in \texttt{degreeOf(weightMatrix, v)} and precomputed into an array \texttt{degrees[100]} in $O(V^2)$ time before A* starts. On undirected (symmetric) mesh networks, out-degree equals the standard undirected degree. Each directed transition $u \to v$ incurs cost:
+\[
+    c(u, v) = \texttt{weightMatrix}[u][v] + 0.1 \times \text{degree}(v),
+\]
+applying the congestion penalty to the target node $v$ (so $g(\text{start}) = 0$).
+
+\subsection{Heuristic Formulation and Proof of Admissibility}
+Since Task~1 provides no geometric coordinates for network nodes, we precompute the minimum possible single-edge traversal cost across the entire graph:
+\[
+    \text{minStep} = \min_{(u,v) \in E} \bigl(\texttt{weightMatrix}[u][v] + 0.1 \times \text{degree}(v)\bigr)
+\]
+(with $\text{minStep} = 0$ if $E = \emptyset$), and define:
+\[
+    h(n) = \begin{cases}
+        0 & \text{if } n = \text{goal},\\
+        \text{minStep} & \text{if } n \neq \text{goal}.
+    \end{cases}
+\]
+\textbf{Proof of Admissibility and Consistency:}
+\begin{enumerate}
+    \item \emph{Admissibility ($h(n) \le h^*(n)$):} For $n = \text{goal}$, $h(\text{goal}) = 0 = h^*(\text{goal})$. For any $n \neq \text{goal}$ that can reach $\text{goal}$, any path $n = v_0 \to v_1 \to \dots \to v_k = \text{goal}$ has $k \ge 1$ edges, each with cost $c(v_{i-1}, v_i) \ge \text{minStep} > 0$. Therefore,
+    \[
+        h^*(n) = \min_{\text{paths}} \sum_{i=1}^{k} c(v_{i-1}, v_i) \ge \text{minStep} = h(n).
+    \]
+    \item \emph{Consistency ($h(u) \le c(u, v) + h(v)$):} For any edge $(u, v) \in E$, we have $c(u, v) \ge \text{minStep}$. If $v = \text{goal}$, then $h(u) \le \text{minStep} \le c(u,v) + 0 = c(u,v) + h(v)$. If $v \neq \text{goal}$, then $h(u) \le \text{minStep} < c(u,v) + \text{minStep} = c(u,v) + h(v)$.
+\end{enumerate}
+Hence $h(n)$ is both admissible and consistent, guaranteeing that \texttt{findMeshPath} always returns an optimal path (confirmed on 100/100 random graphs against reference Dijkstra).
+
+\subsection{Manual Execution Trace on a Sample Network}
+Consider a 6-node mesh network (start $= 0$, goal $= 4$) with directed base latencies:
+\[
+    w(0,1)=1.0,\; w(0,2)=1.4,\; w(1,2)=1.0,\; w(1,3)=1.0,\; w(1,4)=2.0,\; w(1,5)=1.0,\; w(2,4)=1.6,\; w(3,4)=1.5.
+\]
+Node out-degrees are $\deg(0)=2$, $\deg(1)=4$, $\deg(2)=1$, $\deg(3)=1$, $\deg(4)=0$, $\deg(5)=0$. The minimum edge cost is $c(1,5) = 1.0 + 0.1(0) = 1.0$, so $\text{minStep} = 1.0$. Table~\ref{tab:task1-trace} shows the exact execution trace matching \texttt{findMeshPath}.
+
+\begin{table}[h]
+\centering
+\caption{Step-by-step A* trace for Task 1 on the 6-node sample mesh network.}
+\label{tab:task1-trace}
+\begin{tabular}{@{}c c c c l@{}}
+\toprule
+Step & Popped & $(g, h, f)$ & Relaxed Neighbors & Updated $(g, h, f)$ \\
+\midrule
+1 & $0$ & $(0.0, 1.0, 1.0)$ & $1$ (cost $1.0+0.4=1.4$), $2$ (cost $1.4+0.1=1.5$) & $1:(1.4,1.0,2.4)$, $2:(1.5,1.0,2.5)$ \\
+2 & $1$ & $(1.4, 1.0, 2.4)$ & $3$ ($1.1$), $4$ ($2.0$), $5$ ($1.0$) & $3:(2.5,1.0,3.5)$, $4:(3.4,0.0,3.4)$, $5:(2.4,1.0,3.4)$ \\
+3 & $2$ & $(1.5, 1.0, 2.5)$ & $4$ (cost $1.6+0.0=1.6$) & $4:(3.1,0.0,3.1)$ \emph{(improved from $3.4$)} \\
+4 & $4$ & $(3.1, 0.0, 3.1)$ & Goal reached --- stop & Final path: $0 \to 2 \to 4$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Although $0 \to 1 \to 4$ has the same base latency sum ($3.0$) as $0 \to 2 \to 4$, node $1$'s high degree ($\deg(1)=4$) adds a $0.4$ congestion penalty, so A* selects $0 \to 2 \to 4$ with total cost $3.1$.
+
+% ============================================================================
+\section{Task 2: AUV Submarine Navigation in 3D Space}
+% ============================================================================
+
+\subsection{Cost Model and Admissibility Analysis}
+Each transition $u \to v$ incurs travel energy cost:
+\[
+    c(u, v) = w(u, v) \times \left(1 + \frac{|z_v - z_u|}{100}\right),
+\]
+where floating-point division is used. The three specified 3D heuristics from node $n$ to goal $g$ are:
+\begin{align*}
+    h_1(n) &= |x_n - x_g| + |y_n - y_g| + |z_n - z_g| && \text{(Mode 1: 3D Manhattan)}, \\
+    h_2(n) &= \sqrt{(x_n - x_g)^2 + (y_n - y_g)^2 + (z_n - z_g)^2} && \text{(Mode 2: 3D Euclidean)}, \\
+    h_3(n) &= \max(|x_n - x_g|, |y_n - y_g|, |z_n - z_g|) && \text{(Mode 3: 3D Chebyshev)}.
+\end{align*}
+Always $h_3(n) \le h_2(n) \le h_1(n)$.
+
+\textbf{Admissibility Discussion:} None of $h_1, h_2, h_3$ is \emph{unconditionally} admissible for arbitrary weight matrices \texttt{weightMatrix}. Because $w(u, v)$ represents an arbitrary energy cost rather than physical 3D distance, an edge can have $c(u,v) < h_k(u) - h_k(v)$ (for instance, a low-energy current-assisted edge with $w(u,v) = 1$ spanning a coordinate jump of $50$ units). When $w(u,v) \ge d_k(u,v)$ for all edges $(u,v)$, then since $1 + |z_v - z_u|/100 \ge 1$, the triangle inequality guarantees $h_k$ is admissible and consistent. When this lower bound fails, A* can expand the goal prematurely via a suboptimal route.
+
+\subsection{Empirical Comparison of the Three 3D Heuristics}
+Table~\ref{tab:task2-bench} reports real measurements from \texttt{tests/report\_data.cpp} (compiled with \texttt{g++ 15.2.0 -O2}, runtimes averaged over 200 calls to \texttt{findAUVPath}) on three concrete test cases: two admissible networks where $w(u,v) \ge d_{\text{Manhattan}}(u,v)$ (Cases A and B) and one non-admissible network with arbitrary $w(u,v) \in [1, 12]$ and coordinates in $[0, 50]^3$ (Case C).
+
+\begin{table}[h]
+\centering
+\caption{Measured comparison of Task 2 3D heuristics against reference Dijkstra.}
+\label{tab:task2-bench}
+\begin{tabular}{@{}l l r r r r@{}}
+\toprule
+Test Case (Dijkstra Opt.) & Heuristic Mode & Nodes Exp. & Avg. Time ($\mu$s) & Path Cost & Gap \\
+\midrule
+Case A: 50 nodes, admissible & Mode 1 (Manhattan) & 9  & 18.07 & 161.4791 & 0.0000 \\
+(Opt. $= 161.4791$)          & Mode 2 (Euclidean) & 14 & 20.37 & 161.4791 & 0.0000 \\
+                             & Mode 3 (Chebyshev) & 18 &  8.35 & 161.4791 & 0.0000 \\
+\midrule
+Case B: 100 nodes, admissible & Mode 1 (Manhattan) & 6 &  5.17 &  85.6655 & 0.0000 \\
+(Opt. $= 85.6655$)            & Mode 2 (Euclidean) & 7 & 11.32 &  85.6655 & 0.0000 \\
+                              & Mode 3 (Chebyshev) & 8 & 19.53 &  85.6655 & 0.0000 \\
+\midrule
+Case C: 50 nodes, non-admissible & Mode 1 (Manhattan) & 4 & 3.43 & 14.1191 & +2.5568 \\
+(Opt. $= 11.5622$)               & Mode 2 (Euclidean) & 5 & 2.91 & 13.4685 & +1.9063 \\
+                                 & Mode 3 (Chebyshev) & 6 & 2.35 & 13.4685 & +1.9063 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key Observations:}
+\begin{itemize}
+    \item When admissible (Cases A and B, plus 60/60 random admissible instances in \texttt{test\_task2}), all three modes find the exact optimal cost (gap $= 0$). Because $h_1 \ge h_2 \ge h_3$, 3D Manhattan is the most informed admissible heuristic and expands the fewest nodes ($9 < 14 < 18$ in Case A; $6 < 7 < 8$ in Case B).
+    \item When non-admissible (Case C), all three modes terminate even earlier ($4, 5, 6$ expansions) at the expense of optimality, with Manhattan incurring the largest overestimation gap ($+2.5568$ vs.\ $+1.9063$ for Euclidean and Chebyshev). Across 60 random non-admissible instances in \texttt{test\_task2}, Modes 1, 2, and 3 were suboptimal on 33, 32, and 33 instances respectively (max gaps $25.1979$, $28.6616$, and $28.6616$).
+\end{itemize}
+
+% ============================================================================
+\section{Task 3: Probabilistic Pathfinding under Hazard Risk}
+% ============================================================================
+
+\subsection{Risk-Length Trade-off and Analytical Crossover}
+Each edge $(u,v)$ has distance $d(u,v) > 0$ and hazard probability $P_{\text{risk}}(u,v) \in [0, 1)$, yielding expected traversal cost $c(u,v) = d(u,v) + \lambda P_{\text{risk}}(u,v)$ and combined survival probability $P_{\text{safe}}(\text{path}) = \prod_{(u,v)\in\text{path}} (1 - P_{\text{risk}}(u,v))$, stored in the single global variable \texttt{g\_lastPsafe}.
+
+Consider two alternative routes from node $0$ at $(0,0)$ to node $3$ at $(8,0)$:
+\begin{itemize}
+    \item \textbf{Route A (short, risky):} $0 \to 1 \to 3$, with $1=(4,0)$, $d(0,1)=d(1,3)=5.0$, $P_{\text{risk}}(0,1)=P_{\text{risk}}(1,3)=0.40$:
+    \[
+        g_A(\lambda) = 10.0 + 0.80\,\lambda, \qquad P_{\text{safe}}(A) = (1 - 0.40)^2 = 0.3600.
+    \]
+    \item \textbf{Route B (long, safe):} $0 \to 2 \to 3$, with $2=(4,5)$, $d(0,2)=d(2,3)=9.0$, $P_{\text{risk}}(0,2)=P_{\text{risk}}(2,3)=0.05$:
+    \[
+        g_B(\lambda) = 18.0 + 0.10\,\lambda, \qquad P_{\text{safe}}(B) = (1 - 0.05)^2 = 0.9025.
+    \]
+\end{itemize}
+Equating $g_A(\lambda^*) = g_B(\lambda^*)$ gives $10 + 0.8\lambda^* = 18 + 0.1\lambda^* \implies \lambda^* = \frac{8}{0.7} \approx 11.4286$. For $\lambda < \lambda^*$, Route A has lower expected cost; for $\lambda > \lambda^*$, Route B wins.
+
+\subsection{Measured Results Across $\lambda$}
+Table~\ref{tab:task3-lambda} shows the actual outputs of \texttt{findProbabilisticPath} (Mode 2: 2D Euclidean, which is admissible here since every edge satisfies $d(u,v) \ge \|p_u - p_v\|_2$).
+
+\begin{table}[h]
+\centering
+\caption{Measured impact of risk penalty $\lambda$ on route selection and $P_{\text{safe}}$ (Task 3).}
+\label{tab:task3-lambda}
+\begin{tabular}{@{}r c r r l@{}}
+\toprule
+$\lambda$ & Selected Route & Total Cost $g$ & $P_{\text{safe}}$ & Regime \\
+\midrule
+0.0  & $0 \to 1 \to 3$ & 10.0000 & 0.3600 & Pure shortest distance (risk ignored) \\
+5.0  & $0 \to 1 \to 3$ & 14.0000 & 0.3600 & Short/risky still preferred ($\lambda < 11.43$) \\
+10.0 & $0 \to 1 \to 3$ & 18.0000 & 0.3600 & Close to crossover ($18.0 < 19.0$) \\
+12.0 & $0 \to 2 \to 3$ & 19.2000 & 0.9025 & Switched to long/safe ($19.2 < 19.6$) \\
+20.0 & $0 \to 2 \to 3$ & 20.0000 & 0.9025 & Strong risk aversion ($20.0 < 26.0$) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+As in Task~2, 2D Manhattan/Euclidean heuristics are admissible only when $d(u,v) + \lambda P_{\text{risk}}(u,v)$ lower-bounds the chosen coordinate metric along every edge (verified 60/60 optimal on admissible random instances in \texttt{test\_task3}, and suboptimal on 29/60 Mode~1 and 27/60 Mode~2 instances when $d(u,v)$ is unconstrained).
+
+% ============================================================================
+\section{Task 4: Game Character Navigation with Multi-Terrain Obstacles}
+% ============================================================================
+
+\subsection{Heuristics and Admissibility}
+With 8-directional movement, flat cost $1.0$, swamp cost $2.0$, and a $1.5\times$ diagonal multiplier:
+\begin{itemize}
+    \item \textbf{Mode 2 (Chebyshev):} $h(x,y) = \max(|x-x_g|, |y-y_g|)$ is \emph{admissible and consistent}, because every valid move (cardinal or diagonal) reduces $\max(|x-x_g|, |y-y_g|)$ by at most $1$ while costing at least $1.0$. Confirmed 100/100 optimal against reference Dijkstra.
+    \item \textbf{Mode 1 (Manhattan):} $h(x,y) = |x-x_g| + |y-y_g|$ is \emph{not admissible}: a single diagonal move on flat terrain costs $1.5$, whereas Manhattan estimates $2.0$. Across 100 random grids in \texttt{test\_task4}, Mode 1 produced suboptimal paths on 9/100 instances (max gap $1.0000$).
+\end{itemize}
+
+\subsection{Step-by-Step Execution Trace on a $4 \times 4$ Grid}
+Consider the $4 \times 4$ grid from $(0,0)$ to $(3,3)$ under Mode 2 (Chebyshev), where \texttt{0} $=$ flat, \texttt{1} $=$ obstacle, and \texttt{2} $=$ swamp:
+\[
+    \begin{bmatrix}
+        0 & 1 & 0 & 0 \\
+        0 & 2 & 2 & 0 \\
+        0 & 0 & 1 & 0 \\
+        0 & 0 & 0 & 0
+    \end{bmatrix}
+\]
+Table~\ref{tab:task4-trace} records the exact expansion order, corner-cutting rejections, and cost updates produced by our implementation.
+
+\begin{table}[h]
+\centering
+\caption{Step-by-step A* trace for Task 4 on the $4\times 4$ grid (Mode 2: Chebyshev).}
+\label{tab:task4-trace}
+\begin{tabular}{@{}c c c l@{}}
+\toprule
+Step & Popped & $(g, h, f)$ & Expansions, Corner-Cutting Checks, and Updates \\
+\midrule
+1 & $(0,0)$ & $(0.0, 3, 3.0)$ & Relax $(1,0): g=1.0, f=4.0$. \textbf{Corner-cut blocked:} $(0,0)\to(1,1)$ since $(0,1)=1$. \\
+2 & $(1,0)$ & $(1.0, 3, 4.0)$ & Relax $(2,0): g=2.0, f=5.0$; $(1,1)$ [swamp]: $g=3.0, f=5.0$; $(2,1)$ [diag]: $g=2.5, f=4.5$. \\
+3 & $(2,1)$ & $(2.5, 2, 4.5)$ & Relax $(3,1): g=3.5, f=5.5$; $(3,0)$ [diag]: $g=4.0, f=7.0$. \\
+  &         &                 & \textbf{Corner-cut blocked:} $(2,1)\to(1,2)$ and $(2,1)\to(3,2)$ since $(2,2)=1$. \\
+4 & $(1,1)$ & $(3.0, 2, 5.0)$ & Relax $(1,2)$ [swamp]: $g=5.0, f=7.0$. \textbf{Blocked:} $\to(0,0), (0,2)$ via $(0,1)=1$. \\
+5 & $(2,0)$ & $(2.0, 3, 5.0)$ & \textbf{Cost update:} $(3,0)$ improved from $g=4.0$ to $g=3.0$ ($f=6.0$). \\
+6 & $(3,1)$ & $(3.5, 2, 5.5)$ & Relax $(3,2): g=4.5, f=5.5$. \\
+7 & $(3,2)$ & $(4.5, 1, 5.5)$ & Relax $(3,3): g=5.5, f=5.5$. \textbf{Blocked:} $\to(2,1), (2,3)$ via $(2,2)=1$. \\
+8 & $(3,3)$ & $(5.5, 0, 5.5)$ & Goal reached --- stop. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The returned linked list is:
+\texttt{Start} $(0,3,3) \to \texttt{Down}$ $(1,3,4) \to \texttt{Down-Right}$ $(2.5,2,4.5) \to \texttt{Down}$ $(3.5,2,5.5) \to \texttt{Right}$ $(4.5,1,5.5) \to \texttt{Right}$ $(5.5,0,5.5)$.
+
+% ============================================================================
+\section{Task 5: VLSI PCB Wire Routing with Bending Penalty}
+% ============================================================================
+
+\subsection{Grid-to-Graph Transformation}
+Because \texttt{weightMatrix} has fixed dimensions $100 \times 100$, the function first checks $m > 0$, $n > 0$, and $m \cdot n \le 100$ (otherwise returning \texttt{nullptr}). Each grid cell $(x,y)$ is mapped to vertex ID $u = x \cdot n + y \in \{0, \dots, m \cdot n - 1\}$. The transformation then:
+\begin{enumerate}
+    \item Zeros the entire $(m \cdot n) \times (m \cdot n)$ submatrix of \texttt{weightMatrix}.
+    \item Iterates over every free cell $(x,y)$ with $\texttt{pcbGrid}[x][y] = 0$ and checks its four cardinal neighbors $(x+\Delta x, y+\Delta y) \in \{(-1,0),(1,0),(0,-1),(0,1)\}$. Whenever the neighbor is in bounds and free, it sets $\texttt{weightMatrix}[u][v] = 1.0$. Because every free cell is visited, the resulting adjacency matrix is symmetric.
+\end{enumerate}
+
+\subsection{Direction-Augmented State Space for Bending Penalties}
+In a plain cell-indexed A* search, the cost of leaving cell $u$ depends on the direction used to \emph{enter} $u$: two paths arriving at $u$ with the same $g$ (or even a slightly higher $g$) may yield a cheaper continuation if one avoids a $B = 0.5$ bend on the next step. Collapsing all arrivals at $u$ into a single \texttt{bestG[u]} entry can therefore lose optimality.
+
+To preserve the Markov property of shortest paths, we augment the search state to a pair:
+\[
+    s = (\text{cell}, d_{\text{prev}}) \;\longleftrightarrow\; \text{stateId} = \text{cell} \times 5 + d_{\text{prev}},
+\]
+where $d_{\text{prev}} \in \{0:\text{Up},\; 1:\text{Down},\; 2:\text{Left},\; 3:\text{Right},\; 4:\text{None}\}$.
+\begin{itemize}
+    \item The start state is $(\text{startCell}, 4)$, so the first move incurs no bend penalty.
+    \item Expanding $(\text{cell}, d_{\text{prev}})$ in cardinal direction $d \in \{0,1,2,3\}$ (checking $\texttt{weightMatrix}[\text{cell}][\text{nextCell}] > 0$) transitions to $(\text{nextCell}, d)$ with cost $1.0 + (0.5 \text{ if } d_{\text{prev}} \neq 4 \text{ and } d_{\text{prev}} \neq d \text{ else } 0.0)$.
+    \item Any state $(\text{exitCell}, d)$ with $d \in \{0..4\}$ satisfies \texttt{isGoal(s)}.
+    \item Both Mode 1 (Manhattan) and Mode 2 (Chebyshev) depend only on cell coordinates and are \emph{admissible and consistent} because every cardinal move costs at least $1.0$ and changes Manhattan distance by at most $1$ (verified 100/100 optimal in both modes against reference Dijkstra).
+\end{itemize}
+
+\subsection{Worked Bending Trade-off Example}
+On a $6 \times 5$ PCB grid from $(0,0)$ to $(4,4)$ with two open corridors (\texttt{main.cpp} Demo 5, populating $38$ directed edges in the $30 \times 30$ \texttt{weightMatrix}):
+\begin{itemize}
+    \item \textbf{Staircase corridor:} 8 steps with 7 bends $\implies g = 8.0 + 7 \times 0.5 = 11.5$.
+    \item \textbf{Outer straight corridor:} $(0,0)\to(5,0)\to(5,4)\to(4,4)$ has 10 steps with only 2 bends $\implies g = 10.0 + 2 \times 0.5 = 11.0$.
+\end{itemize}
+\texttt{findPCBPath} correctly routes along the 10-step outer corridor ($g = 11.0 < 11.5$), demonstrating that minimizing bends can make a longer straight trace optimal.
+
+% ============================================================================
+\section{Summary of Implementation Assumptions}
+% ============================================================================
+
+Where the assignment specification was silent, the following conservative assumptions were adopted and isolated in single constants or helper functions (full details in \texttt{NOTES.md}):
+\begin{enumerate}
+    \item \textbf{Fixed node count (Tasks 1--3):} Matrices are treated as $100 \times 100$ zero-initialized arrays; out-of-bounds start/goal indices return \texttt{nullptr}.
+    \item \textbf{Edge existence (Tasks 1--3):} Directed edge $u \to v$ exists iff $\text{matrix}[u][v] > 0$ and $u \neq v$.
+    \item \textbf{Task 1 degree:} \texttt{degreeOf} computes out-degree (row count of positive entries $j \neq v$).
+    \item \textbf{Task 3 $P_{\text{safe}}$:} Reported via the single global \texttt{double g\_lastPsafe} ($1.0$ for single-node path, $0.0$ if unreachable).
+    \item \textbf{Invalid heuristic mode (Tasks 2--5):} Falls back to Mode 1 (Manhattan).
+    \item \textbf{Grid coordinates (Tasks 4--5):} $x$ is row (\texttt{grid[x][y]}), $y$ is column; \texttt{Up} $= x-1$, \texttt{Down} $= x+1$, \texttt{Left} $= y-1$, \texttt{Right} $= y+1$. Task~4 names the start node \texttt{"Start"}.
+    \item \textbf{Task 5 grid limits:} $0 =$ free, $1 =$ obstacle; requires $m \cdot n \le 100$. \texttt{weightMatrix} is zeroed and populated whenever $m \cdot n \le 100$ before validating start/exit.
+\end{enumerate}
+
+\end{document}
